@@ -53,6 +53,7 @@ export type StreamEvent =
       output: Record<string, unknown>;
       elapsed_seconds: number;
       char_count: number;
+      attempts?: number;
     }
   | { type: "final_package"; output: Record<string, unknown> }
   | { type: "complete"; generation_id: string; version: number }
