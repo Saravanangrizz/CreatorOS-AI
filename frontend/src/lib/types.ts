@@ -14,6 +14,9 @@ export interface AgentStepOutput {
   output: Record<string, unknown> & { reasoning?: string };
   elapsed_seconds?: number;
   char_count?: number;
+  elapsed_seconds?: number;
+  char_count?: number;
+  attempts?: number;
 }
 
 export interface GenerationSettings {
