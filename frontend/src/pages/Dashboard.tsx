@@ -117,7 +117,7 @@ export function Dashboard() {
         if (event.type === "stage_start") {
           setLiveActiveKey(event.agent);
           pushLog(`${event.display_name} — working…`, "active");
-        } } else if (event.type === "stage_done") {
+        }  else if (event.type === "stage_done") {
           setLiveSteps((prev) => ({ ...prev, [event.agent]: event }));
           setLiveActiveKey(null);
           const retryNote = event.attempts && event.attempts > 1 ? ` — recovered after ${event.attempts} attempts` : "";
