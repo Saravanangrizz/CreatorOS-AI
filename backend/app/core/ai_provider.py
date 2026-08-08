@@ -1,48 +1,48 @@
 """
 Model-agnostic AI provider layer.
-
+ 
 Every agent talks to `AIProvider`, never to a vendor SDK directly. Switching
 the whole platform from Gemini to OpenAI or Claude is a one-line env change
 (AI_PROVIDER=openai) plus an API key — no code in app/agents/ changes.
-
+ 
 Only GeminiProvider is fully wired to a live API today (that's the key
 available for this build). OpenAIProvider / ClaudeProvider implement the
 same interface with the real SDK call stubbed in a single method, so adding
 a key is a copy-paste-sized change, not an architecture change.
 """
 from __future__ import annotations
-
+ 
 import abc
 import asyncio
 import json
 import logging
 from dataclasses import dataclass
-
+ 
 from app.core.config import Settings, get_settings
-
+ 
 logger = logging.getLogger(__name__)
-
-
+ 
+ 
 class AIProviderError(RuntimeError):
     """Raised when the underlying model call fails or returns unusable output."""
-
-
+ 
+ 
 @dataclass
 class AIResponse:
     text: str
     provider: str
     model: str
-
-
+ 
+ 
 class AIProvider(abc.ABC):
     name: str = "base"
-
+ 
     @abc.abstractmethod
     async def generate(self, system_prompt: str, user_prompt: str, *, json_mode: bool = False) -> AIResponse:
         """Return a single completed response for the given prompts."""
         raise NotImplementedError
-
-
+ 
+ 
 class MockProvider(AIProvider):
     """
     Deterministic, network-free provider used for demo mode, local dev
@@ -50,92 +50,115 @@ class MockProvider(AIProvider):
     prompt-construction and response-parsing code against this — only the
     network call is replaced.
     """
-
+ 
     name = "mock"
-
+ 
     async def generate(self, system_prompt: str, user_prompt: str, *, json_mode: bool = False) -> AIResponse:
         await asyncio.sleep(0.05)  # simulate latency so UI loading states are exercised honestly
         payload = _mock_payload_for(system_prompt, user_prompt, json_mode)
         return AIResponse(text=payload, provider=self.name, model="mock-demo-v1")
-
-
+ 
+ 
+def _safe_finish_reason(response: object) -> str:
+    """Best-effort extraction of why generation stopped, for error messages
+    only — never let a diagnostics lookup itself raise and mask the real error."""
+    try:
+        return str(response.candidates[0].finish_reason)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return "unknown"
+ 
+ 
 class GeminiProvider(AIProvider):
     name = "gemini"
-
+ 
     def __init__(self, api_key: str, model: str):
         if not api_key:
             raise AIProviderError("GEMINI_API_KEY is not set")
         import google.generativeai as genai
-
+ 
         genai.configure(api_key=api_key)
         self._model_name = model
         self._genai = genai
-
+ 
     async def generate(self, system_prompt: str, user_prompt: str, *, json_mode: bool = False) -> AIResponse:
+        generation_config: dict = {"max_output_tokens": 4096}
+        if json_mode:
+            generation_config["response_mime_type"] = "application/json"
+ 
         model = self._genai.GenerativeModel(
             model_name=self._model_name,
             system_instruction=system_prompt,
-            generation_config={"response_mime_type": "application/json"} if json_mode else None,
+            generation_config=generation_config,
         )
         try:
             # google-generativeai's client is sync; run it off the event loop thread
             response = await asyncio.to_thread(model.generate_content, user_prompt)
         except Exception as exc:  # noqa: BLE001 - surface as our own error type
             raise AIProviderError(f"Gemini call failed: {exc}") from exc
-
-        text = getattr(response, "text", None)
+ 
+        try:
+            # response.text can *raise* (not just return empty) when there's
+            # no valid text part — e.g. generation was cut off at
+            # max_output_tokens mid-JSON, or the response was safety-filtered.
+            text = response.text
+        except Exception as exc:  # noqa: BLE001
+            reason = _safe_finish_reason(response)
+            raise AIProviderError(
+                f"Gemini returned no usable text (finish_reason={reason}): {exc}"
+            ) from exc
+ 
         if not text:
             raise AIProviderError("Gemini returned an empty response")
         return AIResponse(text=text, provider=self.name, model=self._model_name)
-
-
+ 
+ 
 class OpenAIProvider(AIProvider):
     """Same interface as GeminiProvider. Wire the real openai SDK call here
     when a key is available — nothing else in the codebase needs to change."""
-
+ 
     name = "openai"
-
+ 
     def __init__(self, api_key: str, model: str):
         if not api_key:
             raise AIProviderError("OPENAI_API_KEY is not set")
         self._api_key = api_key
         self._model = model
-
+ 
     async def generate(self, system_prompt: str, user_prompt: str, *, json_mode: bool = False) -> AIResponse:
         raise AIProviderError(
             "OpenAIProvider is a ready-made stub — implement the openai SDK call here "
             "when a key is added. Interface is identical to GeminiProvider.generate()."
         )
-
-
+ 
+ 
 class ClaudeProvider(AIProvider):
     """Same interface as GeminiProvider. Wire the real anthropic SDK call here
     when a key is available — nothing else in the codebase needs to change."""
-
+ 
     name = "claude"
-
+ 
     def __init__(self, api_key: str, model: str):
         if not api_key:
             raise AIProviderError("ANTHROPIC_API_KEY is not set")
         self._api_key = api_key
         self._model = model
-
+ 
     async def generate(self, system_prompt: str, user_prompt: str, *, json_mode: bool = False) -> AIResponse:
         raise AIProviderError(
             "ClaudeProvider is a ready-made stub — implement the anthropic SDK call here "
             "when a key is added. Interface is identical to GeminiProvider.generate()."
         )
-
-
+ 
+ 
 def get_provider(settings: Settings | None = None) -> AIProvider:
     """Factory: reads AI_PROVIDER (or forces mock in demo mode) and returns
     the configured provider. This is the single switch point for the whole
     platform's model choice."""
     settings = settings or get_settings()
-
+ 
     if settings.demo_mode:
         return MockProvider()
-
+ 
     provider_map = {
         "gemini": lambda: GeminiProvider(settings.gemini_api_key, settings.gemini_model),
         "openai": lambda: OpenAIProvider(settings.openai_api_key, settings.openai_model),
@@ -146,8 +169,8 @@ def get_provider(settings: Settings | None = None) -> AIProvider:
     if not factory:
         raise AIProviderError(f"Unknown AI_PROVIDER '{settings.ai_provider}'")
     return factory()
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # Mock payloads: realistic-shaped JSON so downstream parsing code is exercised
 # the same way it would be against a real model, keyed off cheap keyword
@@ -163,15 +186,15 @@ def _extract_topic(user_prompt: str) -> str:
             return line.split(":", 1)[1].strip()[:80] or "your topic"
     # First call in the chain (Trend Analyst) receives the bare topic directly
     return user_prompt.strip().splitlines()[0][:80] if user_prompt.strip() else "your topic"
-
-
+ 
+ 
 def _mock_payload_for(system_prompt: str, user_prompt: str, json_mode: bool) -> str:
     sp = system_prompt.lower()
     topic = _extract_topic(user_prompt)
-
+ 
     if not json_mode:
         return f"[demo mode] Response for: {topic}"
-
+ 
     if "trend analyst" in sp:
         data = {
             "trending_angles": [
@@ -244,5 +267,5 @@ def _mock_payload_for(system_prompt: str, user_prompt: str, json_mode: bool) -> 
         }
     else:
         data = {"result": f"[demo mode] generic response for {topic}"}
-
+ 
     return json.dumps(data)
