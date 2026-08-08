@@ -117,13 +117,12 @@ export function Dashboard() {
         if (event.type === "stage_start") {
           setLiveActiveKey(event.agent);
           pushLog(`${event.display_name} — working…`, "active");
-        } else if (event.type === "stage_done") {
+        } } else if (event.type === "stage_done") {
           setLiveSteps((prev) => ({ ...prev, [event.agent]: event }));
           setLiveActiveKey(null);
+          const retryNote = event.attempts && event.attempts > 1 ? ` — recovered after ${event.attempts} attempts` : "";
           pushLog(
-            `${event.display_name} — done in ${event.elapsed_seconds.toFixed(1)}s (${event.char_count} chars)`,
-            "done"
-          );
+            `${event.display_name} — done in ${event.elapsed_seconds.toFixed(1)}s (${event.char_count} chars)${retryNote}`,"done");
         } else if (event.type === "final_package") {
           pushLog("Assembling final package…");
         } else if (event.type === "complete") {
